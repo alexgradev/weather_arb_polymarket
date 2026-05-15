@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-weatherbet.py — Weather Trading Bot for Polymarket
+weatherbet.py - Weather Trading Bot for Polymarket
 =====================================================
 Tracks weather forecasts from 3 sources (ECMWF, HRRR, METAR),
 compares with Polymarket markets, paper trades using Kelly criterion.
@@ -72,7 +72,7 @@ def norm_cdf(x):
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
 def bucket_prob(forecast, t_low, t_high, sigma=None):
-    """For regular buckets — exact match. For edge buckets — normal distribution."""
+    """For regular buckets - exact match. For edge buckets - normal distribution."""
     s = sigma or 2.0
     if t_low == -999:
         return norm_cdf((t_high - float(forecast)) / s)
@@ -184,7 +184,7 @@ def get_hrrr(city_slug, dates):
         f"?latitude={loc['lat']}&longitude={loc['lon']}"
         f"&daily=temperature_2m_max&temperature_unit=fahrenheit"
         f"&forecast_days=3&timezone={TIMEZONES.get(city_slug, 'UTC')}"
-        f"&models=gfs_seamless"  # HRRR+GFS seamless — best option for US
+        f"&models=gfs_seamless"  # HRRR+GFS seamless - best option for US
     )
     for attempt in range(3):
         try:
@@ -250,7 +250,7 @@ def check_market_resolved(market_id):
         closed = data.get("closed", False)
         if not closed:
             return None
-        # Check YES price — if ~1.0 then WIN, if ~0.0 then LOSS
+        # Check YES price - if ~1.0 then WIN, if ~0.0 then LOSS
         prices = json.loads(data.get("outcomePrices", "[0.5,0.5]"))
         yes_price = float(prices[0])
         if yes_price >= 0.95:
@@ -458,7 +458,7 @@ def scan_and_update():
             if mkt["status"] == "resolved":
                 continue
 
-            # Update outcomes list — prices taken directly from event
+            # Update outcomes list - prices taken directly from event
             outcomes = []
             for market in event.get("markets", []):
                 question = market.get("question", "")
@@ -527,7 +527,7 @@ def scan_and_update():
                     entry = pos["entry_price"]
                     stop  = pos.get("stop_price", entry * 0.80)  # 20% stop by default
 
-                    # Trailing: if up 20%+ — move stop to breakeven
+                    # Trailing: if up 20%+ - move stop to breakeven
                     if current_price >= entry * 1.20 and stop < entry:
                         pos["stop_price"] = entry
                         pos["trailing_activated"] = True
@@ -550,7 +550,7 @@ def scan_and_update():
                 pos = mkt["position"]
                 old_bucket_low  = pos["bucket_low"]
                 old_bucket_high = pos["bucket_high"]
-                # 2-degree buffer — avoid closing on small forecast fluctuations
+                # 2-degree buffer - avoid closing on small forecast fluctuations
                 unit = loc["unit"]
                 buffer = 2.0 if unit == "F" else 1.0
                 mid_bucket = (old_bucket_low + old_bucket_high) / 2 if old_bucket_low != -999 and old_bucket_high != 999 else forecast_temp
@@ -570,7 +570,7 @@ def scan_and_update():
                         mkt["position"]["pnl"]          = pnl
                         mkt["position"]["status"]       = "closed"
                         closed += 1
-                        print(f"  [CLOSE] {loc['name']} {date} — forecast changed | PnL: {'+'if pnl>=0 else ''}{pnl:.2f}")
+                        print(f"  [CLOSE] {loc['name']} {date} - forecast changed | PnL: {'+'if pnl>=0 else ''}{pnl:.2f}")
 
             # --- OPEN POSITION ---
             if not mkt.get("position") and forecast_temp is not None and hours >= MIN_HOURS:
@@ -578,7 +578,7 @@ def scan_and_update():
                 best_signal = None
 
                 # Find exactly ONE bucket that matches the forecast
-                # If forecast doesn't fit any bucket cleanly — skip this market
+                # If forecast doesn't fit any bucket cleanly - skip this market
                 matched_bucket = None
                 for o in outcomes:
                     t_low, t_high = o["range"]
@@ -594,7 +594,7 @@ def scan_and_update():
                     ask    = o.get("ask", o["price"])
                     spread = o.get("spread", 0)
 
-                    # All filters — if any fails, skip this market entirely
+                    # All filters - if any fails, skip this market entirely
                     if volume >= MIN_VOLUME:
                         p  = bucket_prob(forecast_temp, t_low, t_high, sigma)
                         ev = calc_ev(p, ask)
@@ -637,7 +637,7 @@ def scan_and_update():
                         real_spread = round(real_ask - real_bid, 4)
                         # Re-check slippage and price with real values
                         if real_spread > MAX_SLIPPAGE or real_ask >= MAX_PRICE:
-                            print(f"  [SKIP] {loc['name']} {date} — real ask ${real_ask:.3f} spread ${real_spread:.3f}")
+                            print(f"  [SKIP] {loc['name']} {date} - real ask ${real_ask:.3f} spread ${real_spread:.3f}")
                             skip_position = True
                         else:
                             best_signal["entry_price"]  = real_ask
@@ -685,7 +685,7 @@ def scan_and_update():
         if won is None:
             continue  # market still open
 
-        # Market closed — record result
+        # Market closed - record result
         price  = pos["entry_price"]
         size   = pos["cost"]
         shares = pos["shares"]
@@ -744,7 +744,7 @@ def print_status():
     total   = wins + losses
 
     print(f"\n{'='*55}")
-    print(f"  WEATHERBET — STATUS")
+    print(f"  WEATHERBET - STATUS")
     print(f"{'='*55}")
     print(f"  Balance:     ${bal:,.2f}  (start ${start:,.2f}, {'+'if ret_pct>=0 else ''}{ret_pct:.1f}%)")
     print(f"  Trades:      {total} | W: {wins} | L: {losses} | WR: {wins/total:.0%}" if total else "  No trades yet")
@@ -787,7 +787,7 @@ def print_report():
     resolved = [m for m in markets if m["status"] == "resolved" and m.get("pnl") is not None]
 
     print(f"\n{'='*55}")
-    print(f"  WEATHERBET — FULL REPORT")
+    print(f"  WEATHERBET - FULL REPORT")
     print(f"{'='*55}")
 
     if not resolved:
@@ -833,7 +833,7 @@ def print_markets():
     now_str  = now.strftime("%Y-%m-%d %H:%M:%S UTC")
 
     print(f"\n{'='*70}")
-    print(f"  WEATHERBET — LIVE MARKETS")
+    print(f"  WEATHERBET - LIVE MARKETS")
     print(f"  Fetched: {now_str}")
     print(f"{'='*70}\n")
 
@@ -960,7 +960,7 @@ def monitor_positions():
         pos = mkt["position"]
         mid = pos["market_id"]
 
-        # Fetch real bestBid from Polymarket API — actual sell price
+        # Fetch real bestBid from Polymarket API - actual sell price
         current_price = None
         try:
             r = requests.get(f"https://gamma-api.polymarket.com/markets/{mid}", timeout=(3, 5))
@@ -997,11 +997,11 @@ def monitor_positions():
         else:
             take_profit = 0.75        # 48h+: take profit at $0.75
 
-        # Trailing: if up 20%+ — move stop to breakeven
+        # Trailing: if up 20%+ - move stop to breakeven
         if current_price >= entry * 1.20 and stop < entry:
             pos["stop_price"] = entry
             pos["trailing_activated"] = True
-            print(f"  [TRAILING] {city_name} {mkt['date']} — stop moved to breakeven ${entry:.3f}")
+            print(f"  [TRAILING] {city_name} {mkt['date']} - stop moved to breakeven ${entry:.3f}")
 
         # Check take-profit
         take_triggered = take_profit is not None and current_price >= take_profit
@@ -1040,7 +1040,7 @@ def run_loop():
     _cal = load_cal()
 
     print(f"\n{'='*55}")
-    print(f"  WEATHERBET — STARTING")
+    print(f"  WEATHERBET - STARTING")
     print(f"{'='*55}")
     print(f"  Cities:     {len(LOCATIONS)}")
     print(f"  Balance:    ${BALANCE:,.0f} | Max bet: ${MAX_BET}")
@@ -1065,16 +1065,16 @@ def run_loop():
                       f"new: {new_pos} | closed: {closed} | resolved: {resolved}")
                 last_full_scan = time.time()
             except KeyboardInterrupt:
-                print(f"\n  Stopping — saving state...")
+                print(f"\n  Stopping - saving state...")
                 save_state(load_state())
                 print(f"  Done. Bye!")
                 break
             except requests.exceptions.ConnectionError:
-                print(f"  Connection lost — waiting 60 sec")
+                print(f"  Connection lost - waiting 60 sec")
                 time.sleep(60)
                 continue
             except Exception as e:
-                print(f"  Error: {e} — waiting 60 sec")
+                print(f"  Error: {e} - waiting 60 sec")
                 time.sleep(60)
                 continue
         else:
@@ -1091,7 +1091,7 @@ def run_loop():
         try:
             time.sleep(MONITOR_INTERVAL)
         except KeyboardInterrupt:
-            print(f"\n  Stopping — saving state...")
+            print(f"\n  Stopping - saving state...")
             save_state(load_state())
             print(f"  Done. Bye!")
             break
