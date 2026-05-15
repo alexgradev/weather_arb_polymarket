@@ -63,9 +63,7 @@ Every Polymarket weather market resolves on a specific airport station. NYC reso
 
 ## Installation
 ```bash
-git clone https://github.com/alteregoeth-ai/weatherbot
-cd weatherbot
-pip install requests
+pip install -r requirements.txt
 ```
 
 Create `config.json` in the project folder:
