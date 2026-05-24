@@ -30,7 +30,7 @@ with open("config.json", encoding="utf-8") as f:
 
 BALANCE          = _cfg.get("balance", 10000.0)
 MAX_BET          = _cfg.get("max_bet", 20.0)        # max bet per trade
-MIN_EV           = _cfg.get("min_ev", 0.10)
+MIN_EV           = _cfg.get("min_ev", 0.08)
 MAX_PRICE        = _cfg.get("max_price", 0.45)
 MIN_VOLUME       = _cfg.get("min_volume", 500)
 MIN_HOURS        = _cfg.get("min_hours", 2.0)
@@ -72,13 +72,13 @@ def norm_cdf(x):
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
 def bucket_prob(forecast, t_low, t_high, sigma=None):
-    """For regular buckets - exact match. For edge buckets - normal distribution."""
-    s = sigma or 2.0
+    s = sigma or SIGMA_C
+    fc = float(forecast)
     if t_low == -999:
-        return norm_cdf((t_high - float(forecast)) / s)
+        return norm_cdf((t_high + 0.5 - fc) / s)
     if t_high == 999:
-        return 1.0 - norm_cdf((t_low - float(forecast)) / s)
-    return 1.0 if in_bucket(forecast, t_low, t_high) else 0.0
+        return 1.0 - norm_cdf((t_low - 0.5 - fc) / s)
+    return norm_cdf((t_high + 0.5 - fc) / s) - norm_cdf((t_low - 0.5 - fc) / s)
 
 def calc_ev(p, price):
     if price <= 0 or price >= 1: return 0.0
@@ -545,32 +545,61 @@ def scan_and_update():
                         reason = "STOP" if current_price < entry else "TRAILING BE"
                         print(f"  [{reason}] {loc['name']} {date} | entry ${entry:.3f} exit ${current_price:.3f} | PnL: {'+'if pnl>=0 else ''}{pnl:.2f}")
 
-            # --- CLOSE POSITION if forecast shifted 2+ degrees ---
-            if mkt.get("position") and forecast_temp is not None:
+            # Reevaluation ev 6 hours
+            if mkt.get("position") and mkt["position"].get("status") == "open":
                 pos = mkt["position"]
-                old_bucket_low  = pos["bucket_low"]
-                old_bucket_high = pos["bucket_high"]
-                # 2-degree buffer - avoid closing on small forecast fluctuations
-                unit = loc["unit"]
-                buffer = 2.0 if unit == "F" else 1.0
-                mid_bucket = (old_bucket_low + old_bucket_high) / 2 if old_bucket_low != -999 and old_bucket_high != 999 else forecast_temp
-                forecast_far = abs(forecast_temp - mid_bucket) > (abs(mid_bucket - old_bucket_low) + buffer)
-                if not in_bucket(forecast_temp, old_bucket_low, old_bucket_high) and forecast_far:
+
+                #close, <2h to res
+                if hours < MIN_HOURS:
                     current_price = None
                     for o in outcomes:
                         if o["market_id"] == pos["market_id"]:
-                            current_price = o["price"]
+                            current_price = o.get("bid", o["price"])
                             break
+
                     if current_price is not None:
                         pnl = round((current_price - pos["entry_price"]) * pos["shares"], 2)
                         balance += pos["cost"] + pnl
-                        mkt["position"]["closed_at"]    = snap.get("ts")
-                        mkt["position"]["close_reason"] = "forecast_changed"
-                        mkt["position"]["exit_price"]   = current_price
-                        mkt["position"]["pnl"]          = pnl
-                        mkt["position"]["status"]       = "closed"
+                        pos["closed_at"]    = snap.get("ts")
+                        pos["close_reason"] = "expiry_cutoff"
+                        pos["exit_price"]   = current_price
+                        pos["pnl"]          = pnl
+                        pos["status"]       = "closed"
                         closed += 1
-                        print(f"  [CLOSE] {loc['name']} {date} - forecast changed | PnL: {'+'if pnl>=0 else ''}{pnl:.2f}")
+                        print(f"  [EXPIRY] {loc['name']} {date} | <2hrs left | PnL: {'+'if pnl>=0 else ''}{pnl:.2f}")
+
+                elif forecast_temp is not None:
+                    sigma = get_sigma(city_slug, best_source or "ecmwf")
+                    bucket_low  = pos["bucket_low"]
+                    bucket_high = pos["bucket_high"]
+                    p_new  = bucket_prob(forecast_temp, bucket_low, bucket_high, sigma)
+                    ev_new = calc_ev(p_new, pos["entry_price"])
+                    current_price = None
+                    for o in outcomes:
+                        if o["market_id"] == pos["market_id"]:
+                            current_price = o.get("bid", o["price"])
+                            break
+
+                    close_reason = None
+                    if ev_new < 0:
+                        close_reason = "forecast_flip"      #reversed forecast - close
+                    elif ev_new < 0.02:
+                        close_reason = "edge_collapsed"    
+
+                    if close_reason and current_price is not None:
+                        pnl = round((current_price - pos["entry_price"]) * pos["shares"], 2)
+                        balance += pos["cost"] + pnl
+                        pos["closed_at"]    = snap.get("ts")
+                        pos["close_reason"] = close_reason
+                        pos["exit_price"]   = current_price
+                        pos["pnl"]          = pnl
+                        pos["status"]       = "closed"
+                        pos["ev_at_close"]  = round(ev_new, 4)
+                        closed += 1
+                        print(f"  [CLOSE/{close_reason.upper()}] {loc['name']} {date} | EV={ev_new:+.3f} | PnL: {'+'if pnl>=0 else ''}{pnl:.2f}")
+                    else:
+                        #log res
+                        pos["last_ev_check"] = {"ts": snap.get("ts"), "ev": round(ev_new, 4), "p": round(p_new, 4)}
 
             # --- OPEN POSITION ---
             if not mkt.get("position") and forecast_temp is not None and hours >= MIN_HOURS:
