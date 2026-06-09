@@ -376,7 +376,7 @@ def compare_sources(city_slug: str, dates: list, locations: dict, timezones: dic
 
 if __name__ == "__main__":
     TEST_LOCATIONS = {
-        "seoul":   {"lat": 37.558, "lon": 126.794, "unit": "C", "region": "asia"},
+        "seoul":   {"lat": 37.4691, "lon": 126.4505, "unit": "C", "region": "asia"},  # Incheon RKSI
         "beijing": {"lat": 40.080, "lon": 116.585, "unit": "C", "region": "asia"},
     }
     TEST_TIMEZONES = {"seoul": "Asia/Seoul", "beijing": "Asia/Shanghai"}

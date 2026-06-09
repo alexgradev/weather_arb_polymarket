@@ -42,15 +42,7 @@ CALIBRATION_MIN  = _cfg.get("calibration_min", 30)
 VC_KEY           = _cfg.get("vc_key", "")
 
 SIGMA_F = 2.0
-SIGMA_C = 2.0
-
-# A2 additional sources — import if available
-try:
-    from sources_a2 import get_jma, get_cma, get_gfs_ensemble, get_dynamic_sigma, consensus_forecast
-    A2_SOURCES = True
-except ImportError:
-    A2_SOURCES = False
-    print("  [WARN] sources_a2.py not found — running with ECMWF only")
+SIGMA_C = 1.2
 
 DATA_DIR         = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
@@ -60,7 +52,7 @@ MARKETS_DIR.mkdir(exist_ok=True)
 CALIBRATION_FILE = DATA_DIR / "calibration.json"
 
 LOCATIONS = {
-    "seoul":   {"lat": 37.558,   "lon":  126.794,  "name": "Seoul",   "station": "RKSS", "unit": "C", "region": "asia"},  # Gimpo (RKSS) — Polymarket resolution station
+    "seoul":   {"lat": 37.4691,  "lon":  126.4505, "name": "Seoul",   "station": "RKSI", "unit": "C", "region": "asia"},
     "beijing": {"lat": 40.0801,  "lon":  116.585,   "name": "Beijing", "station": "ZBAA", "unit": "C", "region": "asia"},
 }
 
@@ -400,59 +392,25 @@ def take_forecast_snapshot(city_slug, dates):
     hrrr    = get_hrrr(city_slug, dates)
     today   = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    # A2 additional sources
-    jma = get_jma(city_slug, dates, LOCATIONS, TIMEZONES) if A2_SOURCES else {}
-    cma = get_cma(city_slug, dates, LOCATIONS, TIMEZONES) if A2_SOURCES else {}
-    ens = get_gfs_ensemble(city_slug, dates, LOCATIONS, TIMEZONES) if A2_SOURCES else {}
-
     snapshots = {}
     for date in dates:
         snap = {
-            "ts":           now_str,
-            "ecmwf":        ecmwf.get(date),
-            "hrrr":         hrrr.get(date) if date <= (datetime.now(timezone.utc) + timedelta(days=2)).strftime("%Y-%m-%d") else None,
-            "metar":        get_metar(city_slug) if date == today else None,
-            "jma":          jma.get(date),
-            "cma":          cma.get(date),
-            "gfs_ensemble": ens.get(date),
+            "ts":    now_str,
+            "ecmwf": ecmwf.get(date),
+            "hrrr":  hrrr.get(date) if date <= (datetime.now(timezone.utc) + timedelta(days=2)).strftime("%Y-%m-%d") else None,
+            "metar": get_metar(city_slug) if date == today else None,
         }
-
+        # Best forecast: HRRR for US D+0/D+1, otherwise ECMWF
         loc = LOCATIONS[city_slug]
-
-        if A2_SOURCES and any(snap[k] is not None for k in ["jma", "cma"]):
-            gfs_mean = snap["gfs_ensemble"]["mean"] if snap["gfs_ensemble"] else None
-            con = consensus_forecast(
-                ecmwf_val    = snap["ecmwf"],
-                jma_val      = snap["jma"],
-                cma_val      = snap["cma"],
-                gfs_mean_val = gfs_mean,
-            )
-            snap["consensus"]      = con["temp"]
-            snap["disagreement"]   = con["disagreement"]
-            snap["skip_consensus"] = con["skip"]   # True = sources disagree >2C, skip trade
-            snap["sources_used"]   = con["sources_used"]
-            if con["skip"]:
-                snap["best"] = None
-                snap["best_source"] = "skip_disagreement"
-            else:
-                snap["best"] = con["temp"]
-                snap["best_source"] = "consensus"
-        elif loc["region"] == "us" and snap["hrrr"] is not None:
+        if loc["region"] == "us" and snap["hrrr"] is not None:
             snap["best"] = snap["hrrr"]
             snap["best_source"] = "hrrr"
-            snap["disagreement"] = 0.0
-            snap["skip_consensus"] = False
         elif snap["ecmwf"] is not None:
             snap["best"] = snap["ecmwf"]
             snap["best_source"] = "ecmwf"
-            snap["disagreement"] = 0.0
-            snap["skip_consensus"] = False
         else:
             snap["best"] = None
             snap["best_source"] = None
-            snap["disagreement"] = 0.0
-            snap["skip_consensus"] = False
-
         snapshots[date] = snap
     return snapshots
 
@@ -532,23 +490,15 @@ def scan_and_update():
             # Forecast snapshot
             snap = snapshots.get(date, {})
             forecast_snap = {
-                "ts":           snap.get("ts"),
-                "horizon":      horizon,
-                "hours_left":   round(hours, 1),
-                "ecmwf":        snap.get("ecmwf"),
-                "hrrr":         snap.get("hrrr"),
-                "metar":        snap.get("metar"),
-                "jma":          snap.get("jma"),
-                "cma":          snap.get("cma"),
-                "gfs_ensemble": snap.get("gfs_ensemble"),
-                "consensus":    snap.get("consensus"),
-                "disagreement": snap.get("disagreement"),
-                "best":         snap.get("best"),
-                "best_source":  snap.get("best_source"),
+                "ts":          snap.get("ts"),
+                "horizon":     horizon,
+                "hours_left":  round(hours, 1),
+                "ecmwf":       snap.get("ecmwf"),
+                "hrrr":        snap.get("hrrr"),
+                "metar":       snap.get("metar"),
+                "best":        snap.get("best"),
+                "best_source": snap.get("best_source"),
             }
-            # Log if we're skipping due to source disagreement
-            if snap.get("skip_consensus"):
-                print(f"  [SKIP/DISAGREE] {loc['name']} {date} | Δ={snap.get('disagreement'):.1f}°C across sources")
             mkt["forecast_snapshots"].append(forecast_snap)
 
             # Market price snapshot
@@ -619,7 +569,7 @@ def scan_and_update():
                         print(f"  [EXPIRY] {loc['name']} {date} | <2hrs left | PnL: {'+'if pnl>=0 else ''}{pnl:.2f}")
 
                 elif forecast_temp is not None:
-                    sigma = get_dynamic_sigma(city_slug, date, snap.get("gfs_ensemble") or {}, _cal) if A2_SOURCES else get_sigma(city_slug, best_source or "ecmwf")
+                    sigma = get_sigma(city_slug, best_source or "ecmwf")
                     bucket_low  = pos["bucket_low"]
                     bucket_high = pos["bucket_high"]
                     p_new  = bucket_prob(forecast_temp, bucket_low, bucket_high, sigma)
@@ -653,7 +603,7 @@ def scan_and_update():
 
             # --- OPEN POSITION ---
             if not mkt.get("position") and forecast_temp is not None and hours >= MIN_HOURS:
-                sigma = get_dynamic_sigma(city_slug, date, snap.get("gfs_ensemble") or {}, _cal) if A2_SOURCES else get_sigma(city_slug, best_source or "ecmwf")
+                sigma = get_sigma(city_slug, best_source or "ecmwf")
                 best_signal = None
 
                 # Find exactly ONE bucket that matches the forecast
@@ -800,6 +750,7 @@ def scan_and_update():
     all_mkts = load_all_markets()
     resolved_count = len([m for m in all_mkts if m["status"] == "resolved"])
     if resolved_count >= CALIBRATION_MIN:
+        global _cal
         _cal = run_calibration(all_mkts)
 
     return new_pos, closed, resolved
@@ -1123,8 +1074,7 @@ def run_loop():
     print(f"  Cities:     {len(LOCATIONS)}")
     print(f"  Balance:    ${BALANCE:,.0f} | Max bet: ${MAX_BET}")
     print(f"  Scan:       {SCAN_INTERVAL//60} min | Monitor: {MONITOR_INTERVAL//60} min")
-    src_str = "ECMWF + JMA + CMA + GFS-Ensemble + METAR(D+0)" if A2_SOURCES else "ECMWF + HRRR(US) + METAR(D+0)"
-    print(f"  Sources:    {src_str}")
+    print(f"  Sources:    ECMWF + HRRR(US) + METAR(D+0)")
     print(f"  Data:       {DATA_DIR.resolve()}")
     print(f"  Ctrl+C to stop\n")
 
