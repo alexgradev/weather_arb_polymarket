@@ -132,14 +132,30 @@ def find_actual_bin(actual_temp, bins):
 # CORE EVALUATION
 
 
+def _clim_stats(actual_data):
+    """Seasonal climatology = mean/std of the actual temperatures over the period."""
+    vals = [v for v in actual_data.values() if v is not None]
+    if len(vals) < 2:
+        return None, None
+    m  = sum(vals) / len(vals)
+    sd = (sum((v - m) ** 2 for v in vals) / (len(vals) - 1)) ** 0.5
+    return m, sd
+
+
 def evaluate_source(forecast_data, actual_data, sigma):
     """
-    Given forecast dict and actual dict (both {date: float}),
-    compute Brier score and signal stats.
-    Signal = EV >= 0.08 using a simulated retail market price.
+    Given forecast dict and actual dict (both {date: float}), compute the model
+    Brier score and the climatology-baseline Brier score over the same bins.
+
+    The climatology forecast assigns each bin the probability implied by the
+    seasonal Gaussian (mean/std of the actuals). The skill score
+        skill = 1 - bs_model / bs_clim
+    answers a real, non-circular question: does the live forecast beat the
+    naive seasonal baseline? (>0 = yes.)  bs_clim does not depend on `sigma`.
     """
-    predictions = []
-    signals = 0
+    predictions      = []   # (model_p, outcome)
+    clim_predictions = []   # (clim_p,  outcome)
+    clim_mean, clim_std = _clim_stats(actual_data)
     dates = sorted(actual_data.keys())
 
     for i, date in enumerate(dates):
@@ -156,28 +172,18 @@ def evaluate_source(forecast_data, actual_data, sigma):
         if actual_bin is None:
             continue
 
-        p = bucket_prob(forecast_temp, actual_bin[0], actual_bin[1], sigma)
-        predictions.append((p, 1))
-
-        # Simulate realistic market price for this bin
-        # Retail prices are roughly p * 0.85 (they underweight likely bins)
-        # clamped to [0.03, 0.45] matching MAX_PRICE filter
-        simulated_price = max(0.03, min(0.45, p * 0.80))
-        ev = calc_ev(p, simulated_price)
-        if ev >= 0.08:
-            signals += 1
-
         for b in bins:
-            if b != actual_bin:
-                p_other = bucket_prob(forecast_temp, b[0], b[1], sigma)
-                predictions.append((p_other, 0))
+            o = 1 if b == actual_bin else 0
+            predictions.append((bucket_prob(forecast_temp, b[0], b[1], sigma), o))
+            if clim_std:
+                clim_predictions.append((bucket_prob(clim_mean, b[0], b[1], clim_std), o))
 
     city_preds = [p for p, o in predictions if o == 1]
     return {
-        "bs":        brier_score(predictions),
-        "avg_p":     round(sum(city_preds) / len(city_preds), 3) if city_preds else 0,
-        "n_days":    len(city_preds),
-        "n_signals": signals,
+        "bs":       brier_score(predictions),
+        "bs_clim":  brier_score(clim_predictions) if clim_predictions else None,
+        "avg_p":    round(sum(city_preds) / len(city_preds), 3) if city_preds else 0,
+        "n_days":   len(city_preds),
     }
 
 
@@ -244,7 +250,7 @@ def run_backtest(quick=False):
                 print("    No data")
                 continue
 
-            print(f"  {'Source':<8} {'σ=0.8':>7} {'σ=1.0':>7} {'σ=1.2':>7} {'σ=1.5':>7} {'σ=2.0':>7}  {'Signals@0.08EV':>15}")
+            print(f"  {'Source':<8} {'σ=0.8':>7} {'σ=1.0':>7} {'σ=1.2':>7} {'σ=1.5':>7} {'σ=2.0':>7}   {'ClimBS':>7} {'Skill':>7}")
             print(f"  {'─'*70}")
 
             best_bs   = 999
@@ -272,13 +278,15 @@ def run_backtest(quick=False):
                         best_bs  = bs
                         best_cfg = f"{src_name} σ={sigma}"
 
-                # Signals at default sigma=1.2 (index 2)
-                if len(sig_results) > 2 and sig_results[2]["n_days"] > 0:
-                    sigs = sig_results[2]["n_signals"]
-                    days = sig_results[2]["n_days"]
-                    row += f"  {sigs:>4} / {days} days  ({100*sigs//days}%)"
+                # Climatology baseline + best skill across sigmas (non-circular).
+                bs_clim   = next((r["bs_clim"] for r in sig_results if r["bs_clim"] is not None), None)
+                model_bss = [r["bs"] for r in sig_results if r["bs"] is not None]
+                if bs_clim and model_bss:
+                    best_src_bs = min(model_bss)
+                    skill = 1.0 - best_src_bs / bs_clim
+                    row += f"   {bs_clim:>7.4f} {skill*100:>+6.0f}%"
                 else:
-                    row += "  — "
+                    row += f"   {'—':>7} {'—':>7}"
                 print(row)
 
             print(f"\n  → Best config: {best_cfg}  (Brier {best_bs:.4f})")

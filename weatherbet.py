@@ -121,19 +121,21 @@ def get_sigma(city_slug, source="ecmwf"):
 
 def run_calibration(markets):
     """Recalculates sigma from resolved markets."""
-    resolved = [m for m in markets if m.get("resolved") and m.get("actual_temp") is not None]
+    resolved = [m for m in markets if m.get("status") == "resolved" and m.get("actual_temp") is not None]
     cal = load_cal()
     updated = []
 
-    for source in ["ecmwf", "hrrr", "metar"]:
+    for source in ["ecmwf", "jma", "cma"]:
         for city in set(m["city"] for m in resolved):
             group = [m for m in resolved if m["city"] == city]
             errors = []
             for m in group:
-                snap = next((s for s in reversed(m.get("forecast_snapshots", []))
-                             if s["source"] == source), None)
-                if snap and snap.get("temp") is not None:
-                    errors.append(abs(snap["temp"] - m["actual_temp"]))
+                # forecast_snapshots store each source under its own key
+                # (e.g. "ecmwf", "jma", "cma") — use the latest non-null one.
+                val = next((s.get(source) for s in reversed(m.get("forecast_snapshots", []))
+                            if s.get(source) is not None), None)
+                if val is not None:
+                    errors.append(abs(float(val) - m["actual_temp"]))
             if len(errors) < CALIBRATION_MIN:
                 continue
             mae  = sum(errors) / len(errors)
@@ -265,9 +267,43 @@ def check_market_resolved(market_id):
             return True   # WIN
         elif yes_price <= 0.05:
             return False  # LOSS
-        return None  # not yet determined
+        # Market is closed but price is ambiguous (API lag). Resolve to the nearer
+        # side so a closed market never stays open forever (M3).
+        return yes_price >= 0.5
     except Exception as e:
         print(f"  [RESOLVE] {market_id}: {e}")
+    return None
+
+
+def get_actual_from_event(city_slug, date_str):
+    """
+    Actual resolved temperature, read from the winning bucket of the closed event.
+    Polymarket resolves to a whole-degree bucket; we return that bucket's value.
+    Used to populate actual_temp for calibration (K2). No API key needed.
+    Returns float or None.
+    """
+    try:
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        event = get_polymarket_event(city_slug, MONTHS[dt.month - 1], dt.day, dt.year)
+        if not event:
+            return None
+        for market in event.get("markets", []):
+            rng = parse_temp_range(market.get("question", ""))
+            if not rng:
+                continue
+            try:
+                prices = json.loads(market.get("outcomePrices", "[0.5,0.5]"))
+                if float(prices[0]) >= 0.95:   # this bucket won
+                    t_low, t_high = rng
+                    if t_low == -999:
+                        return float(t_high)
+                    if t_high == 999:
+                        return float(t_low)
+                    return round((t_low + t_high) / 2.0, 1)
+            except Exception:
+                continue
+    except Exception as e:
+        print(f"  [ACTUAL] {city_slug} {date_str}: {e}")
     return None
 
 # =============================================================================
@@ -739,14 +775,20 @@ def scan_and_update():
                         new_pos += 1
                         bucket_label = f"{best_signal['bucket_low']}-{best_signal['bucket_high']}{unit_sym}"
                         print(f"  [BUY]  {loc['name']} {horizon} {date} | {bucket_label} | "
-                              f"${best_signal['entry_price']:.3f} | EV {best_signal['ev']:+.2f} | "
-                              f"${best_signal['cost']:.2f} ({best_signal['forecast_src'].upper()})")
+                              f"${best_signal['entry_price']:.3f} (slip {best_signal.get('slippage',0):+.3f}) | "
+                              f"EV {best_signal['ev']:+.2f} | ${best_signal['cost']:.2f} "
+                              f"fill {best_signal.get('fill_frac',1)*100:.0f}% ({best_signal['forecast_src'].upper()})")
 
             # Market closed by time
             if hours < 0.5 and mkt["status"] == "open":
                 mkt["status"] = "closed"
 
             save_market(mkt)
+            # Persist balance/state right after the market file so the two can't
+            # desync if the process dies mid-scan (M2).
+            state["balance"]      = round(balance, 2)
+            state["peak_balance"] = max(state.get("peak_balance", balance), balance)
+            save_state(state)
             time.sleep(0.1)
 
         print("ok")
@@ -784,6 +826,8 @@ def scan_and_update():
         mkt["pnl"]          = pnl
         mkt["status"]       = "resolved"
         mkt["resolved_outcome"] = "win" if won else "loss"
+        # Populate actual_temp from the winning bucket so calibration can run (K2).
+        mkt["actual_temp"]  = get_actual_from_event(mkt["city"], mkt["date"])
 
         if won:
             state["wins"] += 1
@@ -795,6 +839,11 @@ def scan_and_update():
         resolved += 1
 
         save_market(mkt)
+        # Persist balance/state immediately so a crash can't desync state from the
+        # already-saved market file (M2).
+        state["balance"]      = round(balance, 2)
+        state["peak_balance"] = max(state.get("peak_balance", balance), balance)
+        save_state(state)
         time.sleep(0.3)
 
     state["balance"]      = round(balance, 2)
