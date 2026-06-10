@@ -177,7 +177,7 @@ function renderOpen(rows, mode){
       <td class="${pnlCls}">${p.unrealized==null?'—':(p.unrealized>=0?'+':'')+p.unrealized.toFixed(2)}</td>
       <td>${p.ev_at_entry==null?'—':(p.ev_at_entry>=0?'+':'')+p.ev_at_entry.toFixed(2)}</td>
       <td>${p.forecast_src||''}</td>
-      <td><button class="btn" ${mode==='live'?'':'disabled'}
+      <td><button class="btn"
             onclick='executeTrade(${JSON.stringify(p.execution)})'>Execute</button></td>
     </tr>`;
   }).join('');
@@ -208,13 +208,24 @@ function renderResolved(rows){
    rest of the dashboard do not change.
    ===================================================================== */
 async function executeTrade(exec){
-  // SAFETY: never auto-fire. Always require this explicit user click + confirm.
-  const msg = `[PAPER] Would BUY YES ${exec.market_id}\n`+
+  // SAFETY: never auto-fire. Requires this explicit click + confirm. The server
+  // (serve_dashboard.py) is dry-run unless deliberately armed with WEATHERBET_LIVE=1.
+  const msg = `Execute ${exec.side} ${exec.market_id}\n`+
               `limit ${exec.limit_price}  size ${fmtUsd(exec.size_usd)}\n\n`+
-              `Real execution is not wired yet.`;
+              `Sends to /api/execute (dry-run unless the server is live-armed).`;
   if(!confirm(msg)) return;
-  // --- future: await fetch('/api/execute', {method:'POST', body:JSON.stringify(exec)}) ---
-  console.log('executeTrade (stub):', exec);
+  try{
+    const r = await fetch('/api/execute', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(exec)
+    });
+    const res = await r.json();
+    alert(`Result: ${res.status}` + (res.reason ? ` (${res.reason})` : ''));
+    console.log('execute result:', res);
+  }catch(e){
+    alert('Execute failed: ' + e.message +
+          '\n(Are you serving via serve_dashboard.py, not python -m http.server?)');
+  }
 }
 
 loadData();
