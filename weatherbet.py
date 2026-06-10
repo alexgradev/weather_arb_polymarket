@@ -329,6 +329,96 @@ def get_market_price(market_id):
     except Exception:
         return None
 
+# =============================================================================
+# ORDER BOOK / LIQUIDITY  (CLOB API)
+# Pulled lazily — only for a bucket that already passed the top-of-book EV gate,
+# or for an open position being checked for exit. Never for every bucket.
+# =============================================================================
+
+def get_order_book(token_id):
+    """
+    CLOB order book for a YES outcome token.
+    Returns {"asks": [(price, size), ...] ascending, "bids": [(price, size), ...] descending}
+    or None. asks = sellers of YES (we buy here); bids = buyers of YES (we sell here).
+    """
+    if not token_id:
+        return None
+    try:
+        r = requests.get("https://clob.polymarket.com/book",
+                         params={"token_id": token_id}, timeout=(5, 8))
+        d = r.json()
+        asks = sorted(((float(l["price"]), float(l["size"])) for l in d.get("asks", [])),
+                      key=lambda x: x[0])
+        bids = sorted(((float(l["price"]), float(l["size"])) for l in d.get("bids", [])),
+                      key=lambda x: -x[0])
+        return {"asks": asks, "bids": bids}
+    except Exception as e:
+        print(f"  [BOOK] {str(token_id)[:10]}…: {e}")
+        return None
+
+def walk_book_buy(asks, budget_usd):
+    """
+    Spend up to budget_usd buying YES from the ask side (best price first).
+    Returns (vwap_price, shares, usd_spent, fill_frac) or None if nothing available.
+    fill_frac = usd_spent / budget_usd (1.0 = fully filled within available depth).
+    """
+    spent = shares = 0.0
+    for price, size in asks:
+        if price <= 0:
+            continue
+        level_usd = price * size
+        take = min(level_usd, budget_usd - spent)
+        if take <= 1e-9:
+            break
+        shares += take / price
+        spent  += take
+        if spent >= budget_usd - 1e-9:
+            break
+    if shares <= 0:
+        return None
+    return (round(spent / shares, 4), round(shares, 2), round(spent, 2),
+            round(spent / budget_usd, 3) if budget_usd else 0.0)
+
+def walk_book_sell(bids, shares_to_sell):
+    """
+    Sell shares_to_sell of YES into the bid side (best price first).
+    Returns (vwap_price, shares_sold, usd_received, fill_frac) or None.
+    fill_frac = shares_sold / shares_to_sell (1.0 = could fully exit).
+    """
+    sold = proceeds = 0.0
+    for price, size in bids:
+        take = min(size, shares_to_sell - sold)
+        if take <= 1e-9:
+            break
+        proceeds += take * price
+        sold     += take
+        if sold >= shares_to_sell - 1e-9:
+            break
+    if sold <= 0:
+        return None
+    return (round(proceeds / sold, 4), round(sold, 2), round(proceeds, 2),
+            round(sold / shares_to_sell, 3) if shares_to_sell else 0.0)
+
+def sellable(token_id, shares):
+    """Realistic exit (vwap, shares_sold, proceeds, fill_frac) for dumping `shares`, else None."""
+    book = get_order_book(token_id)
+    if not book or not book["bids"]:
+        return None
+    return walk_book_sell(book["bids"], shares)
+
+def realistic_exit_price(pos, min_fill=0.95):
+    """
+    VWAP you would actually receive selling the FULL position into the live book
+    right now, or None if the book can't absorb it (fill < min_fill) — in which
+    case you cannot exit early and must hold to resolution (the honest outcome on
+    a thin market). Returns None for positions without a token_id (legacy).
+    """
+    s = sellable(pos.get("token_id"), pos.get("shares", 0))
+    if not s:
+        return None
+    vwap, _sold, _proceeds, frac = s
+    return vwap if frac >= min_fill else None
+
 def parse_temp_range(question):
     if not question: return None
     num = r'(-?\d+(?:\.\d+)?)'
@@ -556,9 +646,17 @@ def scan_and_update():
                         bid = ask = float(prices[0])  # [0] = YES, never [1]
                 except Exception:
                     continue
+                # YES clob token id — needed to pull the order book at trade time.
+                try:
+                    raw_ids = market.get("clobTokenIds")
+                    tok = (json.loads(raw_ids) if isinstance(raw_ids, str) else raw_ids) or []
+                    yes_token = tok[0] if tok else None
+                except Exception:
+                    yes_token = None
                 outcomes.append({
                     "question":  question,
                     "market_id": mid,
+                    "token_id":  yes_token,
                     "range":     rng,
                     "bid":       round(bid, 4),
                     "ask":       round(ask, 4),
@@ -604,17 +702,18 @@ def scan_and_update():
             forecast_temp = snap.get("best")
             best_source   = snap.get("best_source")
 
+            # Realistic sellable price for an open position — walk the live bid book
+            # once and reuse across all exit checks. None = can't fully exit → hold.
+            exit_px = None
+            if mkt.get("position") and mkt["position"].get("status") == "open":
+                exit_px = realistic_exit_price(mkt["position"])
+
             # --- STOP-LOSS AND TRAILING STOP ---
             if mkt.get("position") and mkt["position"].get("status") == "open":
                 pos = mkt["position"]
-                current_price = None
-                for o in outcomes:
-                    if o["market_id"] == pos["market_id"]:
-                        current_price = o["price"]
-                        break
+                current_price = exit_px
 
                 if current_price is not None:
-                    current_price = o.get("bid", current_price)  # sell at bid
                     entry = pos["entry_price"]
                     stop  = pos.get("stop_price", entry * 0.80)  # 20% stop by default
 
@@ -640,13 +739,9 @@ def scan_and_update():
             if mkt.get("position") and mkt["position"].get("status") == "open":
                 pos = mkt["position"]
 
-                #close, <2h to res
+                #close, <2h to res — only if the book can absorb a full exit; else hold to resolution
                 if hours < MIN_HOURS:
-                    current_price = None
-                    for o in outcomes:
-                        if o["market_id"] == pos["market_id"]:
-                            current_price = o.get("bid", o["price"])
-                            break
+                    current_price = exit_px
 
                     if current_price is not None:
                         pnl = round((current_price - pos["entry_price"]) * pos["shares"], 2)
@@ -665,11 +760,7 @@ def scan_and_update():
                     bucket_high = pos["bucket_high"]
                     p_new  = bucket_prob(forecast_temp, bucket_low, bucket_high, sigma)
                     ev_new = calc_ev(p_new, pos["entry_price"])
-                    current_price = None
-                    for o in outcomes:
-                        if o["market_id"] == pos["market_id"]:
-                            current_price = o.get("bid", o["price"])
-                            break
+                    current_price = exit_px
 
                     close_reason = None
                     if ev_new < 0:
@@ -724,6 +815,7 @@ def scan_and_update():
                             if size >= 0.50:
                                 best_signal = {
                                     "market_id":    o["market_id"],
+                                    "token_id":     o.get("token_id"),
                                     "question":     o["question"],
                                     "bucket_low":   t_low,
                                     "bucket_high":  t_high,
@@ -747,26 +839,43 @@ def scan_and_update():
                                 }
 
                 if best_signal:
-                    # Fetch real bestAsk from Polymarket API for accurate entry price
+                    # Pull the live CLOB order book and compute a realistic walk-the-book
+                    # fill. This supersedes top-of-book pricing, models slippage/partial
+                    # fills ("size to the book"), and re-applies the EV gate (fixes K3).
                     skip_position = False
-                    try:
-                        r = requests.get(f"https://gamma-api.polymarket.com/markets/{best_signal['market_id']}", timeout=(3, 5))
-                        mdata = r.json()
-                        real_ask = float(mdata.get("bestAsk", best_signal["entry_price"]))
-                        real_bid = float(mdata.get("bestBid", best_signal["bid_at_entry"]))
-                        real_spread = round(real_ask - real_bid, 4)
-                        # Re-check slippage and price with real values
-                        if real_spread > MAX_SLIPPAGE or real_ask >= MAX_PRICE:
-                            print(f"  [SKIP] {loc['name']} {date} - real ask ${real_ask:.3f} spread ${real_spread:.3f}")
+                    book = get_order_book(best_signal.get("token_id"))
+                    if not book or not book["asks"]:
+                        print(f"  [SKIP] {loc['name']} {date} - no order book / no asks")
+                        skip_position = True
+                    else:
+                        fill = walk_book_buy(book["asks"], best_signal["cost"])
+                        top_bid = book["bids"][0][0] if book["bids"] else None
+                        if not fill:
+                            print(f"  [SKIP] {loc['name']} {date} - no ask liquidity")
                             skip_position = True
                         else:
-                            best_signal["entry_price"]  = real_ask
-                            best_signal["bid_at_entry"] = real_bid
-                            best_signal["spread"]       = real_spread
-                            best_signal["shares"]       = round(best_signal["cost"] / real_ask, 2)
-                            best_signal["ev"]           = round(calc_ev(best_signal["p"], real_ask), 4)
-                    except Exception as e:
-                        print(f"  [WARN] Could not fetch real ask for {best_signal['market_id']}: {e}")
+                            vwap, shares_f, spent, fill_frac = fill
+                            eff_spread = round(book["asks"][0][0] - top_bid, 4) if top_bid is not None else None
+                            ev_real = calc_ev(best_signal["p"], vwap)
+                            reasons = []
+                            if vwap >= MAX_PRICE:                                  reasons.append(f"fill {vwap:.3f}>=maxprice")
+                            if ev_real < MIN_EV:                                   reasons.append(f"EV {ev_real:+.2f}<{MIN_EV}")
+                            if eff_spread is not None and eff_spread > MAX_SLIPPAGE: reasons.append(f"spread {eff_spread:.3f}")
+                            if spent < 0.50:                                       reasons.append("fillable size <$0.50")
+                            if reasons:
+                                print(f"  [SKIP] {loc['name']} {date} - liq: {', '.join(reasons)}")
+                                skip_position = True
+                            else:
+                                # Accept the (possibly partial) fill — take what the book allows.
+                                best_signal["quoted_ask"]  = best_signal["entry_price"]
+                                best_signal["entry_price"] = vwap
+                                best_signal["bid_at_entry"] = top_bid
+                                best_signal["spread"]      = eff_spread
+                                best_signal["shares"]      = shares_f
+                                best_signal["cost"]        = spent
+                                best_signal["ev"]          = round(ev_real, 4)
+                                best_signal["fill_frac"]   = fill_frac
+                                best_signal["slippage"]    = round(vwap - best_signal["quoted_ask"], 4)
 
                     if not skip_position and best_signal["entry_price"] < MAX_PRICE:
                         balance -= best_signal["cost"]
@@ -1095,24 +1204,10 @@ def monitor_positions():
         pos = mkt["position"]
         mid = pos["market_id"]
 
-        # Fetch real bestBid from Polymarket API - actual sell price
-        current_price = None
-        try:
-            r = requests.get(f"https://gamma-api.polymarket.com/markets/{mid}", timeout=(3, 5))
-            mdata = r.json()
-            best_bid = mdata.get("bestBid")
-            if best_bid is not None:
-                current_price = float(best_bid)
-        except Exception:
-            pass
-
-        # Fallback to cached price if API failed
-        if current_price is None:
-            for o in mkt.get("all_outcomes", []):
-                if o["market_id"] == mid:
-                    current_price = o.get("bid", o["price"])
-                    break
-
+        # Realistic sellable price — walk the live bid book for the FULL position.
+        # None = the book can't absorb the size, so you cannot exit early here;
+        # hold to resolution (the honest outcome on a thin market).
+        current_price = realistic_exit_price(pos)
         if current_price is None:
             continue
 

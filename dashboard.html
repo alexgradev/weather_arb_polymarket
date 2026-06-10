@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WeatherBet — Tracking Dashboard</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c232c; --border:#2d333b;
+    --txt:#e6edf3; --muted:#8b949e; --green:#3fb950; --red:#f85149;
+    --amber:#d29922; --blue:#58a6ff; --accent:#1f6feb;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);
+       font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  .wrap{max-width:1100px;margin:0 auto;padding:24px}
+  header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:20px}
+  h1{font-size:18px;margin:0;letter-spacing:.5px}
+  h1 .ico{color:var(--blue)}
+  .badge{font-size:11px;padding:3px 8px;border-radius:10px;border:1px solid var(--border);text-transform:uppercase;letter-spacing:1px}
+  .badge.paper{background:#1f2a18;color:var(--green);border-color:#2ea04340}
+  .badge.live{background:#2a1818;color:var(--red);border-color:#f8514940}
+  .sub{color:var(--muted);font-size:12px}
+  .bal{font-size:26px;font-weight:600}
+  .ret.up{color:var(--green)} .ret.down{color:var(--red)}
+  h2{font-size:12px;text-transform:uppercase;letter-spacing:1.5px;color:var(--muted);
+     margin:26px 0 10px;border-bottom:1px solid var(--border);padding-bottom:6px}
+  /* scorecard */
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px}
+  .card .lab{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px}
+  .card .val{font-size:22px;font-weight:600;margin:6px 0 2px}
+  .card .tgt{font-size:11px;color:var(--muted)}
+  .pill{display:inline-block;font-size:10px;padding:1px 6px;border-radius:8px;margin-left:6px;vertical-align:middle}
+  .pass{background:#16331c;color:var(--green)} .fail{background:#3a1d1d;color:var(--red)}
+  .na{background:#2a2f36;color:var(--muted)}
+  /* tables */
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--border)}
+  th{color:var(--muted);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.5px}
+  tr:hover td{background:var(--panel2)}
+  .pos{color:var(--green)} .neg{color:var(--red)}
+  .empty{color:var(--muted);padding:18px 10px;font-style:italic}
+  .btn{font:inherit;font-size:12px;padding:4px 10px;border-radius:6px;cursor:pointer;
+       background:var(--accent);color:#fff;border:1px solid var(--accent)}
+  .btn[disabled]{background:#21262d;color:var(--muted);border-color:var(--border);cursor:not-allowed}
+  .foot{color:var(--muted);font-size:11px;margin-top:28px;border-top:1px solid var(--border);padding-top:12px}
+  .err{background:#2a1818;border:1px solid #f8514940;color:#ffb4ae;padding:12px;border-radius:8px;margin:16px 0;font-size:13px}
+  code{background:var(--panel2);padding:1px 5px;border-radius:4px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1><span class="ico">◆</span> WeatherBet — Tracking</h1>
+      <div class="sub" id="started">—</div>
+      <div class="sub" id="generated">loading…</div>
+    </div>
+    <div style="text-align:right">
+      <span class="badge paper" id="mode">PAPER</span>
+      <div class="bal" id="balance">—</div>
+      <div class="sub"><span id="return">—</span> vs start</div>
+    </div>
+  </header>
+
+  <div id="error"></div>
+
+  <h2>Go-live scorecard</h2>
+  <div class="cards" id="scorecard"></div>
+
+  <h2>Open positions <span class="sub" id="openCount"></span></h2>
+  <table>
+    <thead><tr>
+      <th>Market</th><th>Bucket</th><th>Entry</th><th>Now</th><th>Cost</th>
+      <th>Unreal. PnL</th><th>EV@entry</th><th>Src</th><th>Action</th>
+    </tr></thead>
+    <tbody id="openBody"></tbody>
+  </table>
+
+  <h2>Resolved trades <span class="sub" id="resolvedCount"></span></h2>
+  <table>
+    <thead><tr>
+      <th>Market</th><th>Bucket</th><th>Entry</th><th>Exit</th>
+      <th>Actual</th><th>Outcome</th><th>PnL</th>
+    </tr></thead>
+    <tbody id="resolvedBody"></tbody>
+  </table>
+
+  <div class="foot" id="foot"></div>
+</div>
+
+<script>
+/* =====================================================================
+   1) DATA LAYER — read-only fetch of the aggregated feed.
+   ===================================================================== */
+const FEED = 'data/dashboard.json';
+const fmtUsd = v => (v==null ? '—' : '$'+Number(v).toFixed(2));
+const fmtP   = v => (v==null ? '—' : Number(v).toFixed(3));
+const pct    = v => (v==null ? '—' : (v*100).toFixed(0)+'%');
+
+async function loadData(){
+  try{
+    const r = await fetch(FEED + '?t=' + Date.now());
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    render(await r.json());
+    document.getElementById('error').innerHTML = '';
+  }catch(e){
+    document.getElementById('error').innerHTML =
+      `<div class="err">Could not load <code>${FEED}</code> (${e.message}).<br>
+       Run <code>python tracking.py</code> to generate it, and serve this folder
+       with <code>python -m http.server</code> (open via http://localhost:8000/dashboard.html,
+       not file://).</div>`;
+  }
+}
+
+/* =====================================================================
+   2) RENDER LAYER — presentation only.
+   ===================================================================== */
+function render(d){
+  if(d.tracking_started_at){
+    const s = new Date(d.tracking_started_at);
+    const days = Math.floor((Date.now() - s.getTime())/86400000);
+    document.getElementById('started').textContent =
+      'tracking since ' + s.toLocaleString() + ` (day ${days+1})`;
+  }
+  document.getElementById('generated').textContent =
+    'updated ' + new Date(d.generated_at).toLocaleString();
+  const modeEl = document.getElementById('mode');
+  modeEl.textContent = d.mode.toUpperCase();
+  modeEl.className = 'badge ' + (d.mode === 'live' ? 'live' : 'paper');
+  document.getElementById('balance').textContent = fmtUsd(d.balance);
+  const ret = d.return_pct ?? 0;
+  const retEl = document.getElementById('return');
+  retEl.textContent = (ret>=0?'+':'') + ret + '%';
+  retEl.className = 'ret ' + (ret>=0?'up':'down');
+
+  renderScorecard(d.metrics.scorecard);
+  renderOpen(d.open_positions, d.mode);
+  renderResolved(d.resolved_trades);
+
+  const m = d.metrics;
+  document.getElementById('openCount').textContent = `(${d.open_positions.length})`;
+  document.getElementById('resolvedCount').textContent =
+    `(${m.resolved} — ${m.wins}W / ${m.losses}L, PnL ${fmtUsd(m.total_pnl)})`;
+  document.getElementById('foot').innerHTML =
+    `Read-only paper tracking. The <b>Execute</b> action is a stub (see
+     <code>executeTrade()</code>) — wiring it to a signed Polymarket CLOB order is
+     the only change needed to go interactive. Auto-refresh 10s.`;
+}
+
+function renderScorecard(sc){
+  const order = ['brier','win_rate','avg_edge','max_drawdown','sample'];
+  const fmt = {brier:fmtP, win_rate:pct, avg_edge:v=>v==null?'—':(v>=0?'+':'')+v.toFixed(3),
+               max_drawdown:pct, sample:v=>v};
+  document.getElementById('scorecard').innerHTML = order.map(k=>{
+    const c = sc[k];
+    const pill = c.passed===null ? '<span class="pill na">n/a</span>'
+              : c.passed ? '<span class="pill pass">pass</span>'
+                         : '<span class="pill fail">below</span>';
+    const val = c.value==null ? '—' : fmt[k](c.value);
+    return `<div class="card"><div class="lab">${c.label}</div>
+            <div class="val">${val}${pill}</div>
+            <div class="tgt">target ${c.op} ${c.op==='>='||k==='sample'?c.target:(k==='win_rate'||k==='max_drawdown'?(c.target*100)+'%':c.target)}</div></div>`;
+  }).join('');
+}
+
+function renderOpen(rows, mode){
+  const b = document.getElementById('openBody');
+  if(!rows.length){ b.innerHTML = `<tr><td colspan="9" class="empty">No open positions.</td></tr>`; return; }
+  b.innerHTML = rows.map((p,i)=>{
+    const pnlCls = p.unrealized>=0?'pos':'neg';
+    return `<tr>
+      <td>${p.city} ${p.date}</td><td>${p.bucket}</td>
+      <td>${fmtP(p.entry_price)}</td><td>${fmtP(p.current_price)}</td>
+      <td>${fmtUsd(p.cost)}</td>
+      <td class="${pnlCls}">${p.unrealized==null?'—':(p.unrealized>=0?'+':'')+p.unrealized.toFixed(2)}</td>
+      <td>${p.ev_at_entry==null?'—':(p.ev_at_entry>=0?'+':'')+p.ev_at_entry.toFixed(2)}</td>
+      <td>${p.forecast_src||''}</td>
+      <td><button class="btn" ${mode==='live'?'':'disabled'}
+            onclick='executeTrade(${JSON.stringify(p.execution)})'>Execute</button></td>
+    </tr>`;
+  }).join('');
+}
+
+function renderResolved(rows){
+  const b = document.getElementById('resolvedBody');
+  if(!rows.length){ b.innerHTML = `<tr><td colspan="7" class="empty">No resolved trades yet.</td></tr>`; return; }
+  b.innerHTML = rows.map(t=>{
+    const cls = t.pnl>=0?'pos':'neg';
+    const oc = t.outcome==='win' ? `<span class="pos">WIN</span>` : `<span class="neg">LOSS</span>`;
+    return `<tr>
+      <td>${t.city} ${t.date}</td><td>${t.bucket}</td>
+      <td>${fmtP(t.entry)}</td><td>${fmtP(t.exit)}</td>
+      <td>${t.actual_temp==null?'—':t.actual_temp+'°'}</td>
+      <td>${oc}</td>
+      <td class="${cls}">${(t.pnl>=0?'+':'')+Number(t.pnl).toFixed(2)}</td>
+    </tr>`;
+  }).join('');
+}
+
+/* =====================================================================
+   3) ACTION LAYER — THE EXECUTION SEAM.
+   Today: paper mode, this is a stub. To go live you implement ONE thing:
+   POST the `exec` block to a small backend that (a) resolves the YES
+   clobTokenId, (b) signs an EIP-712 CLOB limit order with the user's key,
+   (c) submits it, then flips status paper→submitted. The data model and the
+   rest of the dashboard do not change.
+   ===================================================================== */
+async function executeTrade(exec){
+  // SAFETY: never auto-fire. Always require this explicit user click + confirm.
+  const msg = `[PAPER] Would BUY YES ${exec.market_id}\n`+
+              `limit ${exec.limit_price}  size ${fmtUsd(exec.size_usd)}\n\n`+
+              `Real execution is not wired yet.`;
+  if(!confirm(msg)) return;
+  // --- future: await fetch('/api/execute', {method:'POST', body:JSON.stringify(exec)}) ---
+  console.log('executeTrade (stub):', exec);
+}
+
+loadData();
+setInterval(loadData, 10000);
+</script>
+</body>
+</html>
